@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 if sys.version_info < (3, 9):
     sys.exit(f"Error: Python >= 3.9 required, got {sys.version_info.major}.{sys.version_info.minor}")
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +69,13 @@ def _url_encode(s: str) -> str:
 
 def _make_frontmatter(url: str, block_id: str, block_type: str, title: str) -> str:
     fetch_time = datetime.now(timezone.utc).astimezone().isoformat()
+    safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
     return textwrap.dedent(f"""\
         ---
         url: {url}
         id: {block_id}
         type: {block_type}
-        title: {title}
+        title: "{safe_title}"
         fetch-time: {fetch_time}
         notion2md-version: {__version__}
         ---
@@ -609,7 +610,14 @@ if __name__ == "__main__":
         sys.exit(1)
 
     try:
+        if args.output:
+            out_dir = os.path.dirname(args.output)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+
         markdown = render_from_url(args.notion_url)
+        if not markdown.endswith('\n'):
+            markdown += '\n'
         logger.info("[main] Outputting markdown to %s >>>>>>>>>>", args.output or "stdout")
         if args.output:
             with open(args.output, "w", encoding="utf-8") as f:
