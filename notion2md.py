@@ -10,8 +10,12 @@ import logging
 import urllib.request
 import urllib.error
 import urllib.parse
+from datetime import datetime, timezone
 
-__version__ = "0.3.5"
+if sys.version_info < (3, 9):
+    sys.exit(f"Error: Python >= 3.9 required, got {sys.version_info.major}.{sys.version_info.minor}")
+
+__version__ = "0.4.0"
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,20 @@ def to_uuid(s: str) -> str:
 def _url_encode(s: str) -> str:
     """URL-encode a string (e.g. property id with special chars)."""
     return urllib.parse.quote(s, safe='')
+
+
+def _make_frontmatter(url: str, block_id: str, block_type: str, title: str) -> str:
+    fetch_time = datetime.now(timezone.utc).astimezone().isoformat()
+    return textwrap.dedent(f"""\
+        ---
+        url: {url}
+        id: {block_id}
+        type: {block_type}
+        title: {title}
+        fetch-time: {fetch_time}
+        notion2md-version: {__version__}
+        ---
+    """)
 
 
 # ─── API: Page ────────────────────────────────────────────────────────────────
@@ -348,14 +366,18 @@ DB_TAG_RE = re.compile(
 ID_RE = re.compile(r'([0-9a-f]{32}|[0-9a-f-]{36})', re.I)
 
 
-def render_view(view_id: str) -> str:
+def render_view(view_id: str) -> dict:
     view = retrieve_view(view_id)
-    view_name = view.get("name")
-    logger.info("[render_view] Rendering view '%s' (%s)", view_name or "(untitled)", view_id)
+    view_name = view.get("name") or "Untitled"
+    logger.info("[render_view] Rendering view '%s' (%s)", view_name, view_id)
 
     ds_id = view.get("data_source_id")
     if not ds_id:
-        return "_(view has no data source — likely a dashboard)_"
+        return {
+            "title": f"Untitled (view: {view_name})",
+            "markdown": "_(view has no data source — likely a dashboard)_",
+            "ok": False,
+        }
 
     # Fetch data source title
     ds_title = ""
@@ -397,7 +419,7 @@ def render_view(view_id: str) -> str:
             else:
                 raise
     else:
-        rows = query_data_source(ds_id, filter=merged_filter, sorts=sorts)
+        rows = query_data_source(ds_id, filter=cleaned_filter, sorts=sorts)
 
     # View query + intersection logic
     query_id = None
@@ -435,29 +457,30 @@ def render_view(view_id: str) -> str:
     table = rows_to_markdown_table(rows)
 
     # Build header: ## {data source title} (view id={view_id}, name={view_name})
-    suffix = f"view id={view_id}"
-    if view_name:
-        suffix += f", name={view_name}"
+    suffix = f"view id={view_id}, name={view_name}"
 
     if ds_title:
         header = f"## {ds_title} ({suffix})"
     else:
         header = f"## ({suffix})"
 
-    return f"{header}\n\n{table}" if header else table
+    ds_name = ds_title if ds_title else "Untitled"
+    title = f"{ds_name} (view: {view_name})"
+
+    return {"title": title, "markdown": f"{header}\n\n{table}" if header else table, "ok": True}
 
 
-def render_database(db_id: str) -> str:
+def render_database(db_id: str) -> dict:
     logger.info("[render_database] Rendering database %s", db_id)
     views = list_views(db_id)
     if not views:
-        return "_(no views accessible)_"
+        return {"title": "Untitled (view: Untitled)", "markdown": "_(no views accessible)_", "ok": False}
     view_id = views[0]["id"]
     logger.info("[render_database] Found %d view(s) for database %s", len(views), db_id)
     return render_view(view_id)
 
 
-def render_page(page_id: str) -> str:
+def render_page(page_id: str) -> dict:
     title = get_page_title(page_id)
     md = get_page_markdown(page_id)
 
@@ -465,7 +488,8 @@ def render_page(page_id: str) -> str:
     total = len(tags)
     logger.info("[render_page] Page has %d embedded database(s)", total)
     if not tags:
-        return f"# {title}\n\n{md}" if title else md
+        body = f"# {title}\n\n{md}" if title else md
+        return {"title": title if title else "Untitled", "markdown": body, "ok": True}
 
     idx = 0
 
@@ -480,7 +504,8 @@ def render_page(page_id: str) -> str:
         db_id = to_uuid(m.group(1))
         logger.info("[render_page] Expanding database %d/%d (%s)", idx, total, db_id)
         try:
-            table = render_database(db_id)
+            result = render_database(db_id)
+            table = result["markdown"]
             logger.info("[render_page] Finished database %d/%d (%s)", idx, total, db_id)
         except urllib.error.HTTPError as e:
             body = e.read().decode('utf-8')
@@ -489,7 +514,8 @@ def render_page(page_id: str) -> str:
         return "\n".join([match.group('open_tag'), table, match.group('close_tag')])
 
     expanded = DB_TAG_RE.sub(repl, md)
-    return f"# {title}\n\n{expanded}" if title else expanded
+    body = f"# {title}\n\n{expanded}" if title else expanded
+    return {"title": title if title else "Untitled", "markdown": body, "ok": True}
 
 
 def render_from_url(url: str) -> str:
@@ -515,7 +541,12 @@ def render_from_url(url: str) -> str:
         if not ID_RE.fullmatch(view_id):
             raise ValueError("Invalid view URL")
         logger.info("[render_from_url] View URL detected")
-        return render_view(to_uuid(view_id))
+        view_uuid = to_uuid(view_id)
+        result = render_view(view_uuid)
+        if not result["ok"]:
+            raise ValueError("View does not have a data source (dashboard) — cannot render as table")
+        frontmatter = _make_frontmatter(url, view_uuid, "view", result["title"])
+        return f"{frontmatter}\n{result['markdown']}"
 
     # Extract block UUID from URL path
     m = ID_RE.search(parsed.path)
@@ -528,10 +559,16 @@ def render_from_url(url: str) -> str:
 
     if block_type == "child_page":
         logger.info("[render_from_url] Page URL detected")
-        return render_page(block_id)
+        result = render_page(block_id)
+        frontmatter = _make_frontmatter(url, block_id, "page", result["title"])
+        return f"{frontmatter}\n{result['markdown']}"
     elif block_type == "child_database":
         logger.info("[render_from_url] Database URL detected")
-        return render_database(block_id)
+        result = render_database(block_id)
+        if not result["ok"]:
+            raise ValueError("Database view does not have a data source (dashboard) — cannot render as table")
+        frontmatter = _make_frontmatter(url, block_id, "database", result["title"])
+        return f"{frontmatter}\n{result['markdown']}"
     else:
         raise ValueError(f"Unsupported block type '{block_type}'")
 
