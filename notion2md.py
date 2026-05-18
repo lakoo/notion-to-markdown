@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-__version__ = "0.3.2"
+__version__ = "0.3.5"
 
 logger = logging.getLogger(__name__)
 
@@ -195,14 +195,72 @@ def _clean_filter(node):
 
 
 def _merge_quick_filters_and_filter(quick_filters, filter):
+    """Merge quick_filters and view filter, respecting the 2-level nesting limit.
+
+    data_source query API only supports compound filters (and/or) up to 2
+    levels deep.  When the view's ``filter`` is already ``or(...)`` (which may
+    itself contain nested ``and`` at level 2), wrapping it in another ``and``
+    would reach level 3.  Instead, distribute the quick-filter conditions
+    across each branch using Boolean algebra:
+
+        qf AND (a OR b)  ⇒  (qf AND a) OR (qf AND b)
+
+    When ``filter`` is ``and(...)`` or a leaf, a single ``and`` merge is safe.
+    """
     qf_items = _expand_quick_filters(quick_filters)
-    if filter:
-        qf_items.insert(0, filter)
-    if not qf_items:
+
+    if not qf_items and not filter:
         return None
-    if len(qf_items) == 1:
-        return qf_items[0]
-    return {"and": qf_items}
+    if not qf_items:
+        return filter  # pass view filter as-is
+    if not filter:
+        if len(qf_items) == 1:
+            return qf_items[0]
+        return {"and": qf_items}
+
+    # Both exist — check structure
+    if isinstance(filter, dict) and "or" in filter:
+        # If any branch is itself a compound filter, we must distribute qf
+        # across branches to stay within the 2-level nesting limit.
+        # Otherwise, a simple wrap is safe.
+        has_nested = any(
+            isinstance(item, dict) and ("and" in item or "or" in item)
+            for item in filter["or"]
+        )
+        if has_nested:
+            branches = []
+            for item in filter["or"]:
+                combined = list(qf_items)
+                if isinstance(item, dict) and "and" in item:
+                    combined.extend(item["and"])
+                else:
+                    combined.append(item)
+                if len(combined) == 1:
+                    branches.append(combined[0])
+                else:
+                    branches.append({"and": combined})
+            if not branches:
+                return None
+            if len(branches) == 1:
+                return branches[0]
+            return {"or": branches}
+        # All leaf branches — simple wrap is fine
+        qf_items.append(filter)
+        if len(qf_items) == 1:
+            return qf_items[0]
+        return {"and": qf_items}
+    elif isinstance(filter, dict) and "and" in filter:
+        # Same-type: flatten into a single and
+        qf_items.extend(filter["and"])
+        if len(qf_items) == 1:
+            return qf_items[0]
+        return {"and": qf_items}
+    else:
+        # Leaf — wrap with qf in a single and
+        qf_items.append(filter)
+        if len(qf_items) == 1:
+            return qf_items[0]
+        return {"and": qf_items}
 
 
 # ─── View config helpers ──────────────────────────────────────────────────────
@@ -305,7 +363,6 @@ def render_view(view_id: str) -> str:
         ds = retrieve_data_source(ds_id)
         title_rich = ds.get("title", [])
         ds_title = "".join(x.get("plain_text", "") for x in title_rich)
-        logger.debug("[render_view] data_source keys=%s", list(ds.keys()))
     except Exception:
         logger.warning("[render_view] Could not retrieve data source title")
 
@@ -314,8 +371,9 @@ def render_view(view_id: str) -> str:
     filter = view.get("filter")
     logger.debug("[render_view] raw filter=%s", filter)
     merged_filter = _merge_quick_filters_and_filter(quick_filters, filter)
+    logger.debug("[render_view] merged_filter=%s", merged_filter)
     cleaned_filter = _clean_filter(merged_filter)
-    logger.debug("[render_view] merged_filter=%s cleaned=%s", merged_filter, cleaned_filter)
+    logger.debug("[render_view] cleaned_filter=%s", cleaned_filter)
     sorts = view.get("sorts")
 
     configuration = view.get("configuration")
@@ -346,21 +404,22 @@ def render_view(view_id: str) -> str:
     try:
         vq = create_view_query(view_id)
         query_id = vq["id"]
-        view_count = vq["total_count"]
         view_page_ids = [r["id"] for r in vq["results"]]
         next_cursor = vq.get("next_cursor")
-        ds_count = len(rows)
 
-        if view_count < ds_count:
-            logger.warning("[render_view] ds_count=%d, view_count=%d — counts differ, intersecting with view query results", ds_count, view_count)
-            while next_cursor:
-                more = get_view_query_results(view_id, query_id, next_cursor)
-                view_page_ids.extend(r["id"] for r in more["results"])
-                next_cursor = more.get("next_cursor")
-            view_id_set = set(view_page_ids)
-            rows = [row for row in rows if row["id"] in view_id_set]
-        else:
-            logger.debug("[render_view] ds_count=%d, view_count=%d — counts match, using query_data_source results", ds_count, view_count)
+        # Always paginate through all view query results for complete ordering
+        while next_cursor:
+            more = get_view_query_results(view_id, query_id, next_cursor)
+            view_page_ids.extend(r["id"] for r in more["results"])
+            next_cursor = more.get("next_cursor")
+
+        # Intersect and reorder rows to match view query ordering
+        ds_count = len(rows)
+        vq_count = len(view_page_ids)
+        if vq_count != ds_count:
+            logger.warning("[render_view] ds_count=%d, view_count=%d — counts differ, intersecting with view query results", ds_count, vq_count)
+        rows_by_id = {row["id"]: row for row in rows}
+        rows = [rows_by_id[pid] for pid in view_page_ids if pid in rows_by_id]
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
         logger.warning("[render_view] view query API failed (%d: %s), falling back to query_data_source results", e.code, body)
@@ -422,10 +481,11 @@ def render_page(page_id: str) -> str:
         logger.info("[render_page] Expanding database %d/%d (%s)", idx, total, db_id)
         try:
             table = render_database(db_id)
+            logger.info("[render_page] Finished database %d/%d (%s)", idx, total, db_id)
         except urllib.error.HTTPError as e:
             body = e.read().decode('utf-8')
+            logger.warning("[render_page] Database %d/%d (%s) fetch error (%d: %s), skipping", idx, total, db_id, e.code, body)
             table = f"_(error fetching database: {e.code}: {body})_"
-        logger.info("[render_page] Finished database %d/%d (%s)", idx, total, db_id)
         return "\n".join([match.group('open_tag'), table, match.group('close_tag')])
 
     expanded = DB_TAG_RE.sub(repl, md)
