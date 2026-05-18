@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-__version__ = "0.3.0"
+__version__ = "0.3.2"
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,34 @@ def _expand_quick_filters(quick_filters: dict) -> list:
     return [{"property": k, **v} for k, v in quick_filters.items()]
 
 
+def _clean_filter(node):
+    """Recursively remove empty filter conditions (e.g. ``{"rich_text": {}}``).
+
+    View filters may include property conditions with no operator set, which the
+    view itself ignores but the data-source query API rejects.
+    Returns None when the node becomes empty.
+    """
+    if not isinstance(node, dict):
+        return node
+    if "and" in node or "or" in node:
+        key = "and" if "and" in node else "or"
+        cleaned = [_clean_filter(c) for c in node[key]]
+        cleaned = [c for c in cleaned if c is not None]
+        if not cleaned:
+            return None
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return {key: cleaned}
+    if "property" in node:
+        for type_key, val in node.items():
+            if type_key == "property":
+                continue
+            if isinstance(val, dict) and len(val) == 0:
+                return None
+        return node
+    return node
+
+
 def _merge_quick_filters_and_filter(quick_filters, filter):
     qf_items = _expand_quick_filters(quick_filters)
     if filter:
@@ -277,15 +305,21 @@ def render_view(view_id: str) -> str:
         ds = retrieve_data_source(ds_id)
         title_rich = ds.get("title", [])
         ds_title = "".join(x.get("plain_text", "") for x in title_rich)
+        logger.debug("[render_view] data_source keys=%s", list(ds.keys()))
     except Exception:
         logger.warning("[render_view] Could not retrieve data source title")
 
     quick_filters = view.get("quick_filters")
+    logger.debug("[render_view] raw quick_filters=%s", quick_filters)
     filter = view.get("filter")
+    logger.debug("[render_view] raw filter=%s", filter)
     merged_filter = _merge_quick_filters_and_filter(quick_filters, filter)
+    cleaned_filter = _clean_filter(merged_filter)
+    logger.debug("[render_view] merged_filter=%s cleaned=%s", merged_filter, cleaned_filter)
     sorts = view.get("sorts")
 
     configuration = view.get("configuration")
+    logger.debug("[render_view] configuration=%s", configuration)
     filter_properties = _get_filter_properties(configuration)
     logger.debug("[render_view] filter_properties=%s", filter_properties)
 
@@ -294,14 +328,14 @@ def render_view(view_id: str) -> str:
         try:
             rows = query_data_source(
                 ds_id,
-                filter=merged_filter,
+                filter=cleaned_filter,
                 sorts=sorts,
                 filter_properties=filter_properties
             )
         except urllib.error.HTTPError as e:
             if e.code == 400:
                 logger.warning("[render_view] filter_properties caused 400, falling back to all columns")
-                rows = query_data_source(ds_id, filter=merged_filter, sorts=sorts)
+                rows = query_data_source(ds_id, filter=cleaned_filter, sorts=sorts)
             else:
                 raise
     else:
@@ -368,17 +402,30 @@ def render_page(page_id: str) -> str:
     title = get_page_title(page_id)
     md = get_page_markdown(page_id)
 
+    tags = list(DB_TAG_RE.finditer(md))
+    total = len(tags)
+    logger.info("[render_page] Page has %d embedded database(s)", total)
+    if not tags:
+        return f"# {title}\n\n{md}" if title else md
+
+    idx = 0
+
     def repl(match: re.Match) -> str:
+        nonlocal idx
+        idx += 1
         url = match.group('url')
         m = ID_RE.search(url)
         if not m:
             logger.warning("[render_page] Could not parse database id from %s", url)
             return match.group(0)
+        db_id = to_uuid(m.group(1))
+        logger.info("[render_page] Expanding database %d/%d (%s)", idx, total, db_id)
         try:
-            table = render_database(to_uuid(m.group(1)))
+            table = render_database(db_id)
         except urllib.error.HTTPError as e:
             body = e.read().decode('utf-8')
             table = f"_(error fetching database: {e.code}: {body})_"
+        logger.info("[render_page] Finished database %d/%d (%s)", idx, total, db_id)
         return "\n".join([match.group('open_tag'), table, match.group('close_tag')])
 
     expanded = DB_TAG_RE.sub(repl, md)
@@ -439,8 +486,8 @@ if __name__ == "__main__":
 
         examples:
           export NOTION_API_KEY=ntn_xxx
-          ./notion2md.py https://notion.so/...
-          NOTION_API_KEY=$MY_KEY ./notion2md.py https://notion.so/...
+          ./notion2md.py "https://notion.so/"...
+          NOTION_API_KEY=$MY_KEY ./notion2md.py "https://notion.so/"...
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
