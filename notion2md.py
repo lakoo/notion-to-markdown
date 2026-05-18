@@ -16,10 +16,10 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-_debug = False
+_verbose = False
 
-def _debug_print(*args, **kwargs):
-    if _debug:
+def _verbose_print(*args, **kwargs):
+    if _verbose:
         print(*args, **kwargs)
 
 
@@ -29,7 +29,7 @@ def _request(url: str, method: str = "GET", body: dict | None = None) -> dict:
     req = urllib.request.Request(url, headers=HEADERS, method=method)
     if body is not None:
         req.data = json.dumps(body).encode()
-    _debug_print(f"[_request] method={method}, url={url}, data={req.data}")
+    _verbose_print(f"[_request] method={method}, url={url}, data={req.data}")
     with urllib.request.urlopen(req) as r:
         return json.loads(r.read().decode('utf-8'))
 
@@ -70,6 +70,25 @@ def list_views(database_id: str):
 
 def retrieve_view(view_id: str):
     return _request(f"{NOTION_API_BASE}/views/{view_id}")
+
+
+def create_view_query(view_id: str, page_size: int = 100) -> dict:
+    url = f"{NOTION_API_BASE}/views/{view_id}/queries"
+    body = {"page_size": page_size}
+    return _request(url, method="POST", body=body)
+
+
+def get_view_query_results(view_id: str, query_id: str, start_cursor: str | None, page_size: int = 100) -> dict:
+    url = f"{NOTION_API_BASE}/views/{view_id}/queries/{query_id}"
+    params = f"?page_size={page_size}"
+    if start_cursor:
+        params += f"&start_cursor={_url_encode(start_cursor)}"
+    return _request(url + params)
+
+
+def delete_view_query(view_id: str, query_id: str) -> dict:
+    url = f"{NOTION_API_BASE}/views/{view_id}/queries/{query_id}"
+    return _request(url, method="DELETE")
 
 
 # ─── API: Data source ─────────────────────────────────────────────────────────
@@ -169,9 +188,13 @@ def render_prop(prop: dict) -> str:
         ft = v["type"]
         return str(v.get(ft, ""))
     if t == "relation":
-        return ", ".join(r["id"] for r in v)
+        if not v:
+            return ""
+        return f"<{len(v)} relations>"
     if t == "rollup":
         rt = v["type"]
+        if rt == "array":
+            return "<array>"
         return str(v.get(rt, ""))
     return str(v)
 
@@ -184,7 +207,7 @@ def rows_to_markdown_table(rows):
     if not rows:
         return "_(no rows)_"
     cols = list(rows[0]["properties"].keys())
-    _debug_print(f"[rows_to_markdown_table] cols={cols}")
+    _verbose_print(f"[rows_to_markdown_table] cols={cols}")
     if not cols:
         return "_(no columns)_"
     header = "| " + " | ".join(cols) + " |"
@@ -220,7 +243,8 @@ def render_database_block(db_url: str) -> str:
     views = list_views(db_id)
     if not views:
         return "_(no views accessible)_"
-    view = retrieve_view(views[0]["id"])
+    view_id = views[0]["id"]
+    view = retrieve_view(view_id)
 
     ds_id = view.get("data_source_id")
     if not ds_id:
@@ -233,10 +257,10 @@ def render_database_block(db_url: str) -> str:
 
     configuration = view.get("configuration")
     filter_properties = _get_filter_properties(configuration)
-    _debug_print(f"[render_database_block] filter_properties={filter_properties}")
+    _verbose_print(f"[render_database_block] filter_properties={filter_properties}")
 
     # try filter_properties optimization, fallback on 400
-    _debug_print(f"[render_database_block] calling query_data_source")
+    _verbose_print(f"[render_database_block] calling query_data_source")
     if filter_properties:
         try:
             rows = query_data_source(
@@ -247,14 +271,46 @@ def render_database_block(db_url: str) -> str:
             )
         except urllib.error.HTTPError as e:
             if e.code == 400:
-                _debug_print("[render_database_block] filter_properties caused 400, falling back to all columns")
+                _verbose_print("[render_database_block] filter_properties caused 400, falling back to all columns")
                 rows = query_data_source(ds_id, filter=merged_filter, sorts=sorts)
             else:
                 raise
     else:
         rows = query_data_source(ds_id, filter=merged_filter, sorts=sorts)
 
-    _debug_print(f"[render_database_block] rows returned: {len(rows)}, first row properties: {list(rows[0]['properties'].keys()) if rows else 'none'}")
+    # Compare with view query result count; intersect rows if counts differ.
+    # view query executes filter/sort server-side, matching web UI behavior.
+    query_id = None
+    try:
+        vq = create_view_query(view_id)
+        query_id = vq["id"]
+        view_count = vq["total_count"]
+        view_page_ids = [r["id"] for r in vq["results"]]
+        next_cursor = vq.get("next_cursor")
+        ds_count = len(rows)
+
+        if view_count < ds_count:
+            # Need full view page ids for intersection
+            _verbose_print(f"[render_database_block] ds_count={ds_count}, view_count={view_count} — counts differ, intersecting {view_count} view page ids")
+            while next_cursor:
+                more = get_view_query_results(view_id, query_id, next_cursor)
+                view_page_ids.extend(r["id"] for r in more["results"])
+                next_cursor = more.get("next_cursor")
+            view_id_set = set(view_page_ids)
+            rows = [row for row in rows if row["id"] in view_id_set]
+        else:
+            _verbose_print(f"[render_database_block] ds_count={ds_count}, view_count={view_count} — counts match, using query_data_source results")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8')
+        _verbose_print(f"[render_database_block] view query API failed ({e.code}: {body}), falling back to query_data_source results")
+    finally:
+        if query_id:
+            try:
+                delete_view_query(view_id, query_id)
+            except:
+                pass  # idempotent, cache auto-expires
+
+    _verbose_print(f"[render_database_block] rows returned: {len(rows)}, first row properties: {list(rows[0]['properties'].keys()) if rows else 'none'}")
 
     return rows_to_markdown_table(rows)
 
@@ -280,12 +336,16 @@ def expand_databases(md: str) -> str:
 
 
 if __name__ == "__main__":
+    if not NOTION_API_KEY:
+        print("Error: NOTION_API_KEY environment variable is not set", file=sys.stderr)
+        sys.exit(1)
     parser = argparse.ArgumentParser(prog="notion2md")
     parser.add_argument("page_id", help="Notion page ID (URL, UUID with dashes, or compact UUID)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug output")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    parser.add_argument("--output", "-o", metavar="FILE", help="Write output to FILE instead of stdout")
     args = parser.parse_args()
 
-    _debug = args.debug
+    _verbose = args.verbose
     m = ID_RE.search(args.page_id)
     if not m:
         print(f"Invalid page ID: {args.page_id}", file=sys.stderr)
@@ -295,10 +355,12 @@ if __name__ == "__main__":
         title = get_page_title(page_id)
         md = get_page_markdown(page_id)
         expanded = expand_databases(md)
-        if title:
-            print(f"# {title}\n\n{expanded}")
+        output = f"# {title}\n\n{expanded}" if title else expanded
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(output)
         else:
-            print(expanded)
+            print(output)
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
         print(f"HTTPError {e.code}: {body}", file=sys.stderr)
