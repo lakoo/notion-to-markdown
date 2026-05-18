@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 if sys.version_info < (3, 9):
     sys.exit(f"Error: Python >= 3.9 required, got {sys.version_info.major}.{sys.version_info.minor}")
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 logger = logging.getLogger(__name__)
 
@@ -329,7 +329,7 @@ DB_TAG_RE = re.compile(
     r'(?P<close_tag></database>)',
     re.I
 )
-ID_RE = re.compile(r'([0-9a-f]{32}|[0-9a-f-]{36})', re.I)
+ID_RE = re.compile(r'([0-9a-f]{32})', re.I)
 
 
 def render_view(view_id: str) -> dict:
@@ -514,12 +514,13 @@ def render_from_url(url: str) -> str:
         frontmatter = _make_frontmatter(url, view_uuid, "view", result["title"])
         return f"{frontmatter}\n{result['markdown']}"
 
-    # Extract block UUID from URL path
-    m = ID_RE.search(parsed.path)
+    # Extract block UUID from URL path (last 32-hex-chars segment, in case
+    # slug prefixes like ``202605-`` happen to match as hex).
+    m = ID_RE.findall(parsed.path)
     if not m:
         raise ValueError("Could not parse page/database ID from URL")
 
-    block_id = to_uuid(m.group(1))
+    block_id = to_uuid(m[-1])
     block = retrieve_block(block_id)
     block_type = block.get("type")
 
