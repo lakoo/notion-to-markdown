@@ -43,6 +43,18 @@ export NOTION_API_KEY="ntn_xxxxx"
 | `-o FILE`, `--output FILE` | Write output to a file instead of stdout |
 | `--version` | Show version and exit |
 
+## Background
+
+Notion's API version `2026-03-11` introduced the **Views API** (`/views`, `/views/{id}/queries`, `/data_sources/{id}/query`) and the **Page Markdown API** (`/pages/{id}/markdown`), both previously unavailable.
+
+Under older API versions, fetching a page required recursively walking `/blocks/{id}/children` to discover child blocks. Inline databases appeared as `child_database` blocks, but there was no way to retrieve the corresponding view — and therefore no way to determine the filter, sort, or column configuration that the Notion UI applies. As a result, existing tools and MCP servers either skip inline databases or render them without proper filtering.
+
+This tool targets `2026-03-11` and uses the Views API to:
+
+- Retrieve the view associated with an inline database from its embedded URL
+- Apply the view's server-side filter and sort logic via view queries
+- Expand the result into a Markdown table
+
 ## Architecture
 
 The script uses a **two-phase approach** to render database content:
