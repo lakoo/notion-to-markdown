@@ -1,13 +1,17 @@
+#!/usr/bin/env python3
 import os
 import re
 import json
 import sys
 import time
+import textwrap
 import argparse
 import logging
 import urllib.request
 import urllib.error
 import urllib.parse
+
+__version__ = "0.3.0"
 
 logger = logging.getLogger(__name__)
 
@@ -426,12 +430,26 @@ def render_from_url(url: str) -> str:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="notion2md")
-    parser.add_argument("notion_url", help="Notion page, database, or view URL")
+    parser = argparse.ArgumentParser(
+        prog="notion2md",
+        description="A CLI tool to convert Notion pages, databases, or views to Markdown.",
+        epilog=textwrap.dedent("""\
+        environment variables:
+          NOTION_API_KEY      required for authenticating with Notion API
+
+        examples:
+          export NOTION_API_KEY=ntn_xxx
+          ./notion2md.py https://notion.so/...
+          NOTION_API_KEY=$MY_KEY ./notion2md.py https://notion.so/...
+        """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("notion_url", help="notion page, database, or view URL")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}", help="show version and exit")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--verbose", "-v", action="store_true", help="Enable verbose (debug) output")
-    group.add_argument("--quiet", "-q", action="store_true", help="Suppress info output, show warnings and errors only")
-    parser.add_argument("--output", "-o", metavar="FILE", help="Write output to FILE instead of stdout")
+    group.add_argument("-v", "--verbose", action="store_true", help="enable verbose (debug) output")
+    group.add_argument("-q", "--quiet", action="store_true", help="suppress info output, show warnings and errors only")
+    parser.add_argument("-o", "--output", metavar="FILE", help="write output to FILE instead of stdout")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else (logging.WARNING if args.quiet else logging.INFO)
