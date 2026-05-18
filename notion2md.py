@@ -2,10 +2,14 @@ import os
 import re
 import json
 import sys
+import time
 import argparse
+import logging
 import urllib.request
 import urllib.error
 import urllib.parse
+
+logger = logging.getLogger(__name__)
 
 NOTION_API_KEY = os.environ.get("NOTION_API_KEY")
 NOTION_VERSION = "2026-03-11"
@@ -16,29 +20,37 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-_verbose = False
-
-def _verbose_print(*args, **kwargs):
-    if _verbose:
-        print(*args, **kwargs)
-
 
 # ─── HTTP Layer ────────────────────────────────────────────────────────────────
 
-def _request_notion_api(path: str, method: str = "GET", body: dict | None = None) -> dict:
+def _request_notion_api(path: str, method: str = "GET", body=None, timeout: int = 60, _retries: int = 3) -> dict:
     url = f"{NOTION_API_BASE}{path}"
     req = urllib.request.Request(url, headers=HEADERS, method=method)
     if body is not None:
         req.data = json.dumps(body).encode()
-    _verbose_print(f"[_request_notion_api] method={method}, url={url}, data={req.data}")
-    with urllib.request.urlopen(req) as r:
-        return json.loads(r.read().decode('utf-8'))
+    logger.debug("[_request_notion_api] method=%s, url=%s, data=%s", method, url, req.data)
+
+    for attempt in range(_retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _retries - 1:
+                retry_after = e.headers.get("Retry-After")
+                wait = int(retry_after) if retry_after else 2 ** attempt
+                logger.warning(
+                    "[_request_notion_api] 429 rate limited, retrying in %ds (attempt %d/%d)",
+                    wait, attempt + 1, _retries,
+                )
+                time.sleep(wait)
+                continue
+            raise
 
 
 # ─── Utilities ─────────────────────────────────────────────────────────────────
 
-def to_uuid(raw: str) -> str:
-    s = raw.replace("-", "")
+def to_uuid(s: str) -> str:
+    s = s.replace("-", "")
     return f"{s[0:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:32]}"
 
 
@@ -83,7 +95,7 @@ def create_view_query(view_id: str, page_size: int = 100) -> dict:
     return _request_notion_api(path, method="POST", body=body)
 
 
-def get_view_query_results(view_id: str, query_id: str, start_cursor: str | None, page_size: int = 100) -> dict:
+def get_view_query_results(view_id: str, query_id: str, start_cursor, page_size: int = 100) -> dict:
     path = f"/views/{view_id}/queries/{query_id}"
     params = f"?page_size={page_size}"
     if start_cursor:
@@ -103,7 +115,21 @@ def retrieve_block(block_id: str) -> dict:
 
 # ─── API: Data source ─────────────────────────────────────────────────────────
 
-def query_data_source(data_source_id: str, filter=None, sorts=None, filter_properties: list | None = None):
+_data_source_cache: dict[str, dict] = {}
+
+
+def retrieve_data_source(data_source_id: str) -> dict:
+    cached = _data_source_cache.get(data_source_id)
+    if cached is not None:
+        logger.debug("[retrieve_data_source] cache hit for %s", data_source_id)
+        return cached
+    path = f"/data_sources/{data_source_id}"
+    ds = _request_notion_api(path)
+    _data_source_cache[data_source_id] = ds
+    return ds
+
+
+def query_data_source(data_source_id: str, filter=None, sorts=None, filter_properties=None):
     body = {"page_size": 100}
     if filter:
         body["filter"] = filter
@@ -136,7 +162,7 @@ def _expand_quick_filters(quick_filters: dict) -> list:
     return [{"property": k, **v} for k, v in quick_filters.items()]
 
 
-def _merge_quick_filters_and_filter(quick_filters: dict | None, filter: dict | None) -> dict | None:
+def _merge_quick_filters_and_filter(quick_filters, filter):
     qf_items = _expand_quick_filters(quick_filters)
     if filter:
         qf_items.insert(0, filter)
@@ -149,7 +175,7 @@ def _merge_quick_filters_and_filter(quick_filters: dict | None, filter: dict | N
 
 # ─── View config helpers ──────────────────────────────────────────────────────
 
-def _get_filter_properties(configuration: dict | None) -> list | None:
+def _get_filter_properties(configuration):
     """Returns ordered list of visible property names for filter_properties param.
 
     Returns None if configuration is absent or no visible columns.
@@ -168,44 +194,32 @@ def render_prop(prop: dict) -> str:
     v = prop.get(t)
     if v is None:
         return ""
-    if t in ("title", "rich_text"):
+    elif t in ("title", "rich_text"):
         return "".join(x.get("plain_text", "") for x in v).replace("|", "\\|")
-    if t == "number":
-        return "" if v is None else str(v)
-    if t == "select":
+    elif t == "number":
+        return str(v)
+    elif t in ("select", "status"):
         return v["name"] if v else ""
-    if t == "multi_select":
+    elif t == "multi_select":
         return ", ".join(o["name"] for o in v)
-    if t == "status":
-        return v["name"] if v else ""
-    if t == "date":
-        if not v:
-            return ""
+    elif t == "date":
         return v["start"] + (f" → {v['end']}" if v.get("end") else "")
-    if t == "checkbox":
+    elif t == "checkbox":
         return "✓" if v else ""
-    if t == "url":
+    elif t in ("url", "email", "phone_number"):
         return v or ""
-    if t == "email":
-        return v or ""
-    if t == "phone_number":
-        return v or ""
-    if t == "people":
+    elif t == "people":
         return ", ".join(p.get("name", p["id"]) for p in v)
-    if t == "files":
+    elif t == "files":
         return ", ".join(f.get("name", "") for f in v)
-    if t == "formula":
+    elif t == "formula":
         ft = v["type"]
         return str(v.get(ft, ""))
-    if t == "relation":
-        if not v:
-            return ""
-        return f"<{len(v)} relations>"
-    if t == "rollup":
+    elif t == "relation":
+        return f"<{len(v)} relation(s)>" if v else ""
+    elif t == "rollup":
         rt = v["type"]
-        if rt == "array":
-            return "<array>"
-        return str(v.get(rt, ""))
+        return "<array>" if rt == "array" else str(v.get(rt, ""))
     return str(v)
 
 
@@ -217,7 +231,7 @@ def rows_to_markdown_table(rows):
     if not rows:
         return "_(no rows)_"
     cols = list(rows[0]["properties"].keys())
-    _verbose_print(f"[rows_to_markdown_table] cols={cols}")
+    logger.debug("[rows_to_markdown_table] cols (%d): %s", len(cols), cols)
     if not cols:
         return "_(no columns)_"
     header = "| " + " | ".join(cols) + " |"
@@ -246,10 +260,21 @@ ID_RE = re.compile(r'([0-9a-f]{32}|[0-9a-f-]{36})', re.I)
 
 def render_view(view_id: str) -> str:
     view = retrieve_view(view_id)
+    view_name = view.get("name")
+    logger.info("[render_view] Rendering view '%s' (%s)", view_name or "(untitled)", view_id)
 
     ds_id = view.get("data_source_id")
     if not ds_id:
         return "_(view has no data source — likely a dashboard)_"
+
+    # Fetch data source title
+    ds_title = ""
+    try:
+        ds = retrieve_data_source(ds_id)
+        title_rich = ds.get("title", [])
+        ds_title = "".join(x.get("plain_text", "") for x in title_rich)
+    except Exception:
+        logger.warning("[render_view] Could not retrieve data source title")
 
     quick_filters = view.get("quick_filters")
     filter = view.get("filter")
@@ -258,7 +283,7 @@ def render_view(view_id: str) -> str:
 
     configuration = view.get("configuration")
     filter_properties = _get_filter_properties(configuration)
-    _verbose_print(f"[render_view] filter_properties={filter_properties}")
+    logger.debug("[render_view] filter_properties=%s", filter_properties)
 
     # try filter_properties optimization, fallback on 400
     if filter_properties:
@@ -271,7 +296,7 @@ def render_view(view_id: str) -> str:
             )
         except urllib.error.HTTPError as e:
             if e.code == 400:
-                _verbose_print("[render_view] filter_properties caused 400, falling back to all columns")
+                logger.warning("[render_view] filter_properties caused 400, falling back to all columns")
                 rows = query_data_source(ds_id, filter=merged_filter, sorts=sorts)
             else:
                 raise
@@ -289,7 +314,7 @@ def render_view(view_id: str) -> str:
         ds_count = len(rows)
 
         if view_count < ds_count:
-            _verbose_print(f"[render_view] ds_count={ds_count}, view_count={view_count} — counts differ, intersecting {view_count} view page ids")
+            logger.warning("[render_view] ds_count=%d, view_count=%d — counts differ, intersecting with view query results", ds_count, view_count)
             while next_cursor:
                 more = get_view_query_results(view_id, query_id, next_cursor)
                 view_page_ids.extend(r["id"] for r in more["results"])
@@ -297,10 +322,10 @@ def render_view(view_id: str) -> str:
             view_id_set = set(view_page_ids)
             rows = [row for row in rows if row["id"] in view_id_set]
         else:
-            _verbose_print(f"[render_view] ds_count={ds_count}, view_count={view_count} — counts match, using query_data_source results")
+            logger.debug("[render_view] ds_count=%d, view_count=%d — counts match, using query_data_source results", ds_count, view_count)
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
-        _verbose_print(f"[render_view] view query API failed ({e.code}: {body}), falling back to query_data_source results")
+        logger.warning("[render_view] view query API failed (%d: %s), falling back to query_data_source results", e.code, body)
     finally:
         if query_id:
             try:
@@ -308,42 +333,52 @@ def render_view(view_id: str) -> str:
             except Exception:
                 pass
 
-    _verbose_print(f"[render_view] rows returned: {len(rows)}, first row properties: {list(rows[0]['properties'].keys()) if rows else 'none'}")
+    logger.info("[render_view] Found %d row(s) for view %s", len(rows), view_id)
 
-    return rows_to_markdown_table(rows)
+    table = rows_to_markdown_table(rows)
+
+    # Build header: ## {data source title} (view id={view_id}, name={view_name})
+    suffix = f"view id={view_id}"
+    if view_name:
+        suffix += f", name={view_name}"
+
+    if ds_title:
+        header = f"## {ds_title} ({suffix})"
+    else:
+        header = f"## ({suffix})"
+
+    return f"{header}\n\n{table}" if header else table
 
 
-def render_database_block(db_url: str) -> str:
-    m = ID_RE.search(db_url)
-    if not m:
-        return f"_(could not parse database id from {db_url})_"
-    db_id = to_uuid(m.group(1))
-
+def render_database(db_id: str) -> str:
+    logger.info("[render_database] Rendering database %s", db_id)
     views = list_views(db_id)
     if not views:
         return "_(no views accessible)_"
     view_id = views[0]["id"]
+    logger.info("[render_database] Found %d view(s) for database %s", len(views), db_id)
     return render_view(view_id)
 
 
-def expand_databases(md: str) -> str:
+def render_page(page_id: str) -> str:
+    title = get_page_title(page_id)
+    md = get_page_markdown(page_id)
+
     def repl(match: re.Match) -> str:
         url = match.group('url')
-        title = match.group('title').strip()
+        m = ID_RE.search(url)
+        if not m:
+            logger.warning("[render_page] Could not parse database id from %s", url)
+            return match.group(0)
         try:
-            table = render_database_block(url)
+            table = render_database(to_uuid(m.group(1)))
         except urllib.error.HTTPError as e:
             body = e.read().decode('utf-8')
             table = f"_(error fetching database: {e.code}: {body})_"
+        return "\n".join([match.group('open_tag'), table, match.group('close_tag')])
 
-        lines = [match.group('open_tag')]
-        if title:
-            lines.append(f"## {title}")
-        lines.append(table)
-        lines.append(match.group('close_tag'))
-        return "\n".join(lines)
-
-    return DB_TAG_RE.sub(repl, md)
+    expanded = DB_TAG_RE.sub(repl, md)
+    return f"# {title}\n\n{expanded}" if title else expanded
 
 
 def render_from_url(url: str) -> str:
@@ -351,78 +386,78 @@ def render_from_url(url: str) -> str:
     Render a Notion URL to markdown.
 
     Supported URL formats:
-    - View URL:    ...?v=view_uuid        -> render_view(view_uuid)
-    - Page URL:    .../<page_uuid>        -> page markdown + expand_databases
-    - Database URL: .../<database_uuid>   -> render_database_block(url)
+    - View URL:    ...?v=view_uuid        -> render_view(view_id)
+    - Page URL:    .../<page_uuid>        -> render_page(page_id)
+    - Database URL: .../<database_uuid>   -> render_database(database_id)
     """
     parsed = urllib.parse.urlparse(url)
     if not parsed.scheme or not parsed.netloc:
-        print("Error: Expected a Notion URL (https://...)", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("Expected a Notion URL (https://...)")
+
+    logger.info("[render_from_url] Rendering Notion URL: %s", url)
 
     # Check query params for view parameter (?v=...)
     qs = urllib.parse.parse_qs(parsed.query)
-    raw_view_ids = qs.get("v")
-    if raw_view_ids:
-        view_uuid = raw_view_ids[0]
-        if not ID_RE.fullmatch(view_uuid):
-            print("Error: Invalid view URL", file=sys.stderr)
-            sys.exit(1)
-        _verbose_print("[render_from_url] View URL detected")
-        return render_view(to_uuid(view_uuid))
+    view_ids = qs.get("v")
+    if view_ids:
+        view_id = view_ids[0]
+        if not ID_RE.fullmatch(view_id):
+            raise ValueError("Invalid view URL")
+        logger.info("[render_from_url] View URL detected")
+        return render_view(to_uuid(view_id))
 
     # Extract block UUID from URL path
     m = ID_RE.search(parsed.path)
     if not m:
-        print("Error: Could not parse page/database ID from URL", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("Could not parse page/database ID from URL")
 
-    uuid = to_uuid(m.group(1))
-
-    try:
-        block = retrieve_block(uuid)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode('utf-8')
-        print(f"Error: {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-
+    block_id = to_uuid(m.group(1))
+    block = retrieve_block(block_id)
     block_type = block.get("type")
 
     if block_type == "child_page":
-        _verbose_print("[render_from_url] Page URL detected")
-        title = get_page_title(uuid)
-        md = get_page_markdown(uuid)
-        expanded = expand_databases(md)
-        return f"# {title}\n\n{expanded}" if title else expanded
+        logger.info("[render_from_url] Page URL detected")
+        return render_page(block_id)
     elif block_type == "child_database":
-        _verbose_print("[render_from_url] Database URL detected")
-        return render_database_block(url)
+        logger.info("[render_from_url] Database URL detected")
+        return render_database(block_id)
     else:
-        print(f"Error: Unsupported block type '{block_type}'", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(f"Unsupported block type '{block_type}'")
 
 
 if __name__ == "__main__":
-    if not NOTION_API_KEY:
-        print("Error: NOTION_API_KEY environment variable is not set", file=sys.stderr)
-        sys.exit(1)
-
     parser = argparse.ArgumentParser(prog="notion2md")
     parser.add_argument("notion_url", help="Notion page, database, or view URL")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--verbose", "-v", action="store_true", help="Enable verbose (debug) output")
+    group.add_argument("--quiet", "-q", action="store_true", help="Suppress info output, show warnings and errors only")
     parser.add_argument("--output", "-o", metavar="FILE", help="Write output to FILE instead of stdout")
     args = parser.parse_args()
 
-    _verbose = args.verbose
+    log_level = logging.DEBUG if args.verbose else (logging.WARNING if args.quiet else logging.INFO)
+    logging.basicConfig(
+        format="[%(asctime)s] [%(levelname).1s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+        level=log_level,
+    )
+
+    if not NOTION_API_KEY:
+        logger.error("[main] Error: NOTION_API_KEY environment variable is not set")
+        sys.exit(1)
 
     try:
         markdown = render_from_url(args.notion_url)
+        logger.info("[main] Outputting markdown to %s >>>>>>>>>>", args.output or "stdout")
         if args.output:
-            with open(args.output, "w") as f:
+            with open(args.output, "w", encoding="utf-8") as f:
                 f.write(markdown)
         else:
             print(markdown)
+    except ValueError as e:
+        logger.error("[main] Error: %s", e)
+        sys.exit(1)
     except urllib.error.HTTPError as e:
         body = e.read().decode('utf-8')
-        print(f"HTTPError {e.code}: {body}", file=sys.stderr)
+        logger.error("[main] HTTPError %d: %s", e.code, body)
         sys.exit(1)
