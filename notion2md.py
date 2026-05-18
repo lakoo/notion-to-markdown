@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 if sys.version_info < (3, 9):
     sys.exit(f"Error: Python >= 3.9 required, got {sys.version_info.major}.{sys.version_info.minor}")
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 logger = logging.getLogger(__name__)
 
@@ -213,73 +213,38 @@ def _clean_filter(node):
     return node
 
 
-def _merge_quick_filters_and_filter(quick_filters, filter):
-    """Merge quick_filters and view filter, respecting the 2-level nesting limit.
+def _has_nested_compound(filter):
+    """Check if a filter has compounds at depth >= 2.
 
-    data_source query API only supports compound filters (and/or) up to 2
-    levels deep.  When the view's ``filter`` is already ``or(...)`` (which may
-    itself contain nested ``and`` at level 2), wrapping it in another ``and``
-    would reach level 3.  Instead, distribute the quick-filter conditions
-    across each branch using Boolean algebra:
-
-        qf AND (a OR b)  ⇒  (qf AND a) OR (qf AND b)
-
-    When ``filter`` is ``and(...)`` or a leaf, a single ``and`` merge is safe.
+    data_source query API only accepts up to 2 levels of compound nesting.
+    A filter with compounds inside its top-level ``and``/``or`` (e.g.
+    ``or(Rare, and(Boss, ...))``) is already at the limit — wrapping it in
+    another ``and`` would exceed it.
     """
+    if not isinstance(filter, dict):
+        return False
+    for key in ("and", "or"):
+        if key in filter:
+            for item in filter[key]:
+                if isinstance(item, dict) and ("and" in item or "or" in item):
+                    return True
+    return False
+
+
+def _merge_quick_filters_and_filter(quick_filters, filter):
+    # When filter is already nested at depth 2 (e.g. or(Rare, and(Boss, ...))),
+    # merging qf would push it to depth 3, which the data-source query API
+    # rejects.  Use filter only; view query + intersection fills the gap.
+    if filter and _has_nested_compound(filter):
+        return filter
     qf_items = _expand_quick_filters(quick_filters)
-
-    if not qf_items and not filter:
-        return None
+    if filter:
+        qf_items.insert(0, filter)
     if not qf_items:
-        return filter  # pass view filter as-is
-    if not filter:
-        if len(qf_items) == 1:
-            return qf_items[0]
-        return {"and": qf_items}
-
-    # Both exist — check structure
-    if isinstance(filter, dict) and "or" in filter:
-        # If any branch is itself a compound filter, we must distribute qf
-        # across branches to stay within the 2-level nesting limit.
-        # Otherwise, a simple wrap is safe.
-        has_nested = any(
-            isinstance(item, dict) and ("and" in item or "or" in item)
-            for item in filter["or"]
-        )
-        if has_nested:
-            branches = []
-            for item in filter["or"]:
-                combined = list(qf_items)
-                if isinstance(item, dict) and "and" in item:
-                    combined.extend(item["and"])
-                else:
-                    combined.append(item)
-                if len(combined) == 1:
-                    branches.append(combined[0])
-                else:
-                    branches.append({"and": combined})
-            if not branches:
-                return None
-            if len(branches) == 1:
-                return branches[0]
-            return {"or": branches}
-        # All leaf branches — simple wrap is fine
-        qf_items.append(filter)
-        if len(qf_items) == 1:
-            return qf_items[0]
-        return {"and": qf_items}
-    elif isinstance(filter, dict) and "and" in filter:
-        # Same-type: flatten into a single and
-        qf_items.extend(filter["and"])
-        if len(qf_items) == 1:
-            return qf_items[0]
-        return {"and": qf_items}
-    else:
-        # Leaf — wrap with qf in a single and
-        qf_items.append(filter)
-        if len(qf_items) == 1:
-            return qf_items[0]
-        return {"and": qf_items}
+        return None
+    if len(qf_items) == 1:
+        return qf_items[0]
+    return {"and": qf_items}
 
 
 # ─── View config helpers ──────────────────────────────────────────────────────
