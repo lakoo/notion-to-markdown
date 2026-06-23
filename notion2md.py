@@ -29,7 +29,7 @@ HEADERS = {
 }
 
 
-# ─── HTTP Layer ────────────────────────────────────────────────────────────────
+# ─── HTTP Layer ───────────────────────────────────────────────────────────────
 
 def _request_notion_api(path: str, method: str = "GET", body=None, timeout: int = 60, _retries: int = 3) -> dict:
     url = f"{NOTION_API_BASE}{path}"
@@ -55,7 +55,7 @@ def _request_notion_api(path: str, method: str = "GET", body=None, timeout: int 
             raise
 
 
-# ─── Utilities ─────────────────────────────────────────────────────────────────
+# ─── Utilities ────────────────────────────────────────────────────────────────
 
 def to_uuid(s: str) -> str:
     s = s.replace("-", "")
@@ -173,6 +173,8 @@ def delete_view_query(view_id: str, query_id: str) -> dict:
     return _request_notion_api(path, method="DELETE")
 
 
+# ─── API: Block ───────────────────────────────────────────────────────────────
+
 def retrieve_block(block_id: str) -> dict:
     path = f"/blocks/{block_id}"
     return _request_notion_api(path)
@@ -226,7 +228,7 @@ def query_data_source(data_source_id: str, filter=None, sorts=None, filter_prope
     return results
 
 
-# ─── Filter helpers ────────────────────────────────────────────────────────────
+# ─── Filter helpers ───────────────────────────────────────────────────────────
 
 def _expand_quick_filters(quick_filters: dict) -> list:
     """quick_filters: {name_or_id: condition} -> [{property: name_or_id, **condition}]"""
@@ -371,7 +373,7 @@ def rows_to_markdown_table(rows):
     return "\n".join(lines)
 
 
-# ─── Orchestration ─────────────────────────────────────────────────────────────
+# ─── Orchestration ────────────────────────────────────────────────────────────
 
 DB_TAG_RE = re.compile(
     r'(?P<open_tag><database\s+[^>]*(?<=\s)url="(?P<url>[^"]+)"[^>]*>)'
