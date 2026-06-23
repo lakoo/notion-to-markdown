@@ -67,19 +67,61 @@ def _url_encode(s: str) -> str:
     return urllib.parse.quote(s, safe='')
 
 
-def _make_frontmatter(url: str, block_id: str, block_type: str, title: str) -> str:
+def _make_frontmatter(url: str, block_id: str, block_type: str, title: str, breadcrumbs: list[str]) -> str:
     fetch_time = datetime.now(timezone.utc).astimezone().isoformat()
-    safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
     return textwrap.dedent(f"""\
         ---
         url: {url}
         id: {block_id}
         type: {block_type}
-        title: "{safe_title}"
+        title: {json.dumps(title, ensure_ascii=False)}
+        breadcrumbs: {json.dumps(list(reversed(breadcrumbs)), ensure_ascii=False)}
         fetch-time: {fetch_time}
         notion2md-version: {__version__}
         ---
     """)
+
+
+def _build_breadcrumbs(parent: dict) -> list[str]:
+    """Walk parent chain and return ancestor titles from leaf to root.
+
+    Does NOT include the current item's title.  Stops at workspace or on API
+    errors (partial chain is returned).
+    """
+    crumbs: list[str] = []
+    current = parent
+    pt = None
+    step = 0
+
+    try:
+        while True:
+            pt = current.get("type")
+            logger.debug("[_build_breadcrumbs] step=%d, parent type=%s, parent=%s", step, pt, current)
+
+            if pt == "workspace" or not pt:
+                break
+            elif pt == "data_source_id":
+                block_id = current.get("database_id")
+                if not block_id:
+                    break
+            elif pt in ("page_id", "block_id", "database_id"):
+                block_id = current[pt]
+            else:
+                break
+
+            block = retrieve_block(block_id)
+            title = _block_title(block)
+            if title:
+                crumbs.append(title)
+            current = block.get("parent", {})
+            step += 1
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        logger.warning("[_build_breadcrumbs] API error for parent type '%s' at step %d: %s", pt, step, e)
+    finally:
+        crumbs.append("[workspace]" if pt == "workspace" else "[inaccessible]")
+
+    logger.debug("[_build_breadcrumbs] done, crumbs=%s", crumbs)
+    return crumbs
 
 
 # ─── API: Page ────────────────────────────────────────────────────────────────
@@ -134,6 +176,14 @@ def delete_view_query(view_id: str, query_id: str) -> dict:
 def retrieve_block(block_id: str) -> dict:
     path = f"/blocks/{block_id}"
     return _request_notion_api(path)
+
+
+def _block_title(block: dict) -> str:
+    """Extract page/database title from a block object."""
+    bt = block.get("type")
+    if bt in ("child_page", "child_database"):
+        return block.get(bt, {}).get("title", "")
+    return ""
 
 
 # ─── API: Data source ─────────────────────────────────────────────────────────
@@ -511,7 +561,9 @@ def render_from_url(url: str) -> str:
         result = render_view(view_uuid)
         if not result["ok"]:
             raise ValueError("View does not have a data source (dashboard) — cannot render as table")
-        frontmatter = _make_frontmatter(url, view_uuid, "view", result["title"])
+        view = retrieve_view(view_uuid)
+        breadcrumbs = _build_breadcrumbs(view.get("parent", {}))
+        frontmatter = _make_frontmatter(url, view_uuid, "view", result["title"], breadcrumbs)
         return f"{frontmatter}\n{result['markdown']}"
 
     # Extract block UUID from URL path (last 32-hex-chars segment, in case
@@ -527,14 +579,16 @@ def render_from_url(url: str) -> str:
     if block_type == "child_page":
         logger.info("[render_from_url] Page URL detected")
         result = render_page(block_id)
-        frontmatter = _make_frontmatter(url, block_id, "page", result["title"])
+        breadcrumbs = _build_breadcrumbs(block.get("parent", {}))
+        frontmatter = _make_frontmatter(url, block_id, "page", result["title"], breadcrumbs)
         return f"{frontmatter}\n{result['markdown']}"
     elif block_type == "child_database":
         logger.info("[render_from_url] Database URL detected")
         result = render_database(block_id)
         if not result["ok"]:
             raise ValueError("Database view does not have a data source (dashboard) — cannot render as table")
-        frontmatter = _make_frontmatter(url, block_id, "database", result["title"])
+        breadcrumbs = _build_breadcrumbs(block.get("parent", {}))
+        frontmatter = _make_frontmatter(url, block_id, "database", result["title"], breadcrumbs)
         return f"{frontmatter}\n{result['markdown']}"
     else:
         raise ValueError(f"Unsupported block type '{block_type}'")

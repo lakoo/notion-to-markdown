@@ -7,7 +7,7 @@ A single-file CLI tool that converts Notion pages, databases, or views to Markdo
 - **Page** — Convert any Notion page to Markdown; embedded database blocks are expanded inline.
 - **Database** — Render a database as a Markdown table using its first accessible view.
 - **View** — Render a specific view (identified by `?v=` in the URL) as a Markdown table.
-- **Frontmatter** — Output includes YAML-style metadata (source URL, block ID, type, title, fetch time, tool version).
+- **Frontmatter** — Output includes YAML-style metadata (source URL, block ID, type, title, breadcrumbs, fetch time, tool version).
 - **Rate-limit resilience** — Automatic retry with `Retry-After` header or exponential backoff on 429 responses.
 - **Configurable logging** — `--verbose` / `--quiet` flags control log output on stderr.
 
