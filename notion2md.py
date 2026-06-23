@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 if sys.version_info < (3, 9):
     sys.exit(f"Error: Python >= 3.9 required, got {sys.version_info.major}.{sys.version_info.minor}")
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 logger = logging.getLogger(__name__)
 
