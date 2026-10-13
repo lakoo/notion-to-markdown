@@ -31,7 +31,18 @@ HEADERS = {
 
 # ─── HTTP Layer ───────────────────────────────────────────────────────────────
 
+# GET responses, memoized for the life of the process, keyed by path.  No GET
+# passes a body, and callers must treat the returned dicts as read-only.
+_response_cache: dict[str, dict] = {}
+
+
 def _request_notion_api(path: str, method: str = "GET", body=None, timeout: int = 60, _retries: int = 3) -> dict:
+    if method == "GET":
+        cached = _response_cache.get(path)
+        if cached is not None:
+            logger.debug("[_request_notion_api] cache hit: GET %s", path)
+            return cached
+
     url = f"{NOTION_API_BASE}{path}"
     req = urllib.request.Request(url, headers=HEADERS, method=method)
     if body is not None:
@@ -41,7 +52,10 @@ def _request_notion_api(path: str, method: str = "GET", body=None, timeout: int 
     for attempt in range(_retries):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode('utf-8'))
+                result = json.loads(r.read().decode('utf-8'))
+                if method == "GET":
+                    _response_cache[path] = result
+                return result
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < _retries - 1:
                 retry_after = e.headers.get("Retry-After")
@@ -190,18 +204,9 @@ def _block_title(block: dict) -> str:
 
 # ─── API: Data source ─────────────────────────────────────────────────────────
 
-_data_source_cache: dict[str, dict] = {}
-
-
 def retrieve_data_source(data_source_id: str) -> dict:
-    cached = _data_source_cache.get(data_source_id)
-    if cached is not None:
-        logger.debug("[retrieve_data_source] cache hit for %s", data_source_id)
-        return cached
     path = f"/data_sources/{data_source_id}"
-    ds = _request_notion_api(path)
-    _data_source_cache[data_source_id] = ds
-    return ds
+    return _request_notion_api(path)
 
 
 def query_data_source(data_source_id: str, filter=None, sorts=None, filter_properties=None):
