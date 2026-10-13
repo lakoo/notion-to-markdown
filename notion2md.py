@@ -7,6 +7,7 @@ import time
 import textwrap
 import argparse
 import logging
+import html
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -202,6 +203,13 @@ def _block_title(block: dict) -> str:
     return ""
 
 
+def _block_label(block: dict) -> str:
+    """Title of a page/database block, else the block's own rich text."""
+    block_type = block.get("type")
+    rich_text = (block.get(block_type) or {}).get("rich_text", [])
+    return _block_title(block) or "".join(run.get("plain_text", "") for run in rich_text)
+
+
 # ─── API: Data source ─────────────────────────────────────────────────────────
 
 def retrieve_data_source(data_source_id: str) -> dict:
@@ -387,6 +395,55 @@ DB_TAG_RE = re.compile(
     re.I
 )
 ID_RE = re.compile(r'([0-9a-f]{32})', re.I)
+# Self-closing `<mention-page url="..."/>` only.  A mention Notion already
+# resolved carries its label as element content, so it ends with `>` rather
+# than `/>` and is deliberately not matched here.
+MENTION_PAGE_RE = re.compile(
+    r'<mention-page\s+[^>]*?(?<=\s)url="(?P<url>[^"]+)"[^>]*?/>',
+    re.I
+)
+
+
+def expand_mentions(md: str) -> str:
+    """Expand self-closing <mention-page> tags into labelled ones.
+
+    Notion only fills in the label when it already resolved that page earlier
+    in the same render, so most mentions arrive bare.
+    """
+    matches = MENTION_PAGE_RE.findall(md)
+    logger.info("[expand_mentions] Page has %d unexpanded mention-page block(s)", len(matches))
+    if not matches:
+        return md
+
+    # One lookup per URL, success or failure.
+    unique_urls = dict.fromkeys(matches)
+    replacements = {}
+
+    def repl(match: re.Match) -> str:
+        url = match.group("url")
+        if url not in replacements:
+            m = ID_RE.search(url)
+            if not m:
+                logger.warning("[expand_mentions] Could not parse page id from %s", url)
+                replacements[url] = match.group(0)
+            else:
+                page_id = to_uuid(m.group(1))
+                logger.info(
+                    "[expand_mentions] Expanding mention %d/%d (%s)",
+                    len(replacements) + 1, len(unique_urls), page_id,
+                )
+                try:
+                    # A mention can point at a block rather than a page.
+                    label = html.escape(_block_label(retrieve_block(page_id)) or "Untitled", quote=False)
+                except urllib.error.HTTPError as e:
+                    logger.warning("[expand_mentions] Could not fetch title for %s: %s", page_id, e)
+                    label = f"_(error fetching title: {e.code})_"
+                replacements[url] = f'<mention-page url="{url}">{label}</mention-page>'
+        return replacements[url]
+
+    expanded = MENTION_PAGE_RE.sub(repl, md)
+    logger.info("[expand_mentions] Expanded %d unique mention-page block(s)", len(replacements))
+    return expanded
 
 
 def render_view(view_id: str) -> dict:
@@ -506,6 +563,10 @@ def render_database(db_id: str) -> dict:
 def render_page(page_id: str) -> dict:
     title = get_page_title(page_id)
     md = get_page_markdown(page_id)
+
+    # Runs before the database scan, so pages without any database block get
+    # their mentions expanded too.
+    md = expand_mentions(md)
 
     tags = list(DB_TAG_RE.finditer(md))
     total = len(tags)
