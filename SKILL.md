@@ -79,7 +79,7 @@ type: page
 title: "Page title"
 breadcrumbs: ["[workspace]", "Team", "Project"]
 fetch-time: 2026-10-13T16:46:10.363106+08:00
-notion2md-version: 0.5.0
+notion2md-version: 0.6.0
 ---
 ```
 
