@@ -67,6 +67,32 @@ python3 <skill-directory>/notion2md.py -o /tmp/notion-output.md "https://www.not
 python3 <skill-directory>/notion2md.py "https://www.notion.so/My-Page-1a2b3c4d..."
 ```
 
+## Output Format
+
+Output begins with a YAML frontmatter block. This is tool metadata, not page content:
+
+```yaml
+---
+url: https://www.notion.so/...
+id: 1a2b3c4d-...
+type: page
+title: "Page title"
+breadcrumbs: ["[workspace]", "Team", "Project"]
+fetch-time: 2026-10-13T16:46:10.363106+08:00
+notion2md-version: 0.5.0
+---
+```
+
+| Field | Meaning |
+|-------|---------|
+| `url` | Source URL that was converted |
+| `id` | Block ID of the page, database, or view |
+| `type` | `page`, `database`, or `view` |
+| `title` | Title as Notion reports it |
+| `breadcrumbs` | Ancestor titles, root first. The first entry is `[workspace]`, or `[inaccessible]` if the parent chain could not be walked to the top |
+| `fetch-time` | When the conversion ran, in local time |
+| `notion2md-version` | Version of the tool that produced the output |
+
 ## Verification
 
 After converting, confirm:
