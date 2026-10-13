@@ -38,7 +38,7 @@ Supported URL formats:
 
 | URL Type | Example | Renders |
 |----------|---------|---------|
-| Page | `https://www.notion.so/My-Page-1a2b3c4d...` | Page markdown with embedded database tables |
+| Page | `https://www.notion.so/My-Page-1a2b3c4d...` | Page markdown with embedded database tables and resolved page mentions |
 | Database | `https://www.notion.so/1a2b3c4d...` | Markdown table using the first accessible view |
 | View | `https://www.notion.so/...?v=view_uuid` | Specific view as a markdown table |
 
@@ -73,16 +73,17 @@ After converting, confirm:
 - Output is valid Markdown (headings, lists, tables, etc. are intact).
 - All blocks from the Notion page are captured (no empty sections where content should be).
 - Embedded database tables are expanded correctly (look for `_(error` markers).
+- Page mentions carry a title, e.g. `<mention-page url="...">Title</mention-page>`. A `_(error fetching title:` label means that lookup failed; the URL is still there to follow up.
 
 ## Timeout & Progress
 
 - **stdout is empty until the script finishes** — the entire output is assembled and then emitted at once. Seeing no stdout does NOT mean the script is stuck.
-- **Progress is logged to stderr in real-time.** Watch for heartbeat lines like `[render_view]` and `[render_database]`, which indicate the script is actively processing.
-- **Pages with many embedded databases can take 60+ seconds.** Do not impose a short timeout. When invoking through a shell tool, use `timeout: 120000` (or omit the timeout) to allow enough time.
+- **Progress is logged to stderr in real-time.** Watch for heartbeat lines like `[expand_mentions] Expanding mention 3/16 (...)`, `[render_view]`, and `[render_database]`, which indicate the script is actively processing.
+- **Pages with many embedded databases or page mentions can take 60+ seconds.** Each unique mentioned page costs roughly another half second of API round-trip. Do not impose a short timeout. When invoking through a shell tool, use `timeout: 120000` (or omit the timeout) to allow enough time.
 - **Use `-v` for more detail.** Debug-level logs show each Notion API call, which helps diagnose slow pages.
 
 ## Notes
 
 - The script outputs rendered Markdown to **stdout**. Log messages go to **stderr**, so capturing stdout cleanly (e.g., redirecting to a file) works without log noise.
-- Embedded `<database>` tags in page content are expanded into Markdown tables automatically.
+- Embedded `<database>` tags are expanded into Markdown tables, and bare `<mention-page>` tags are expanded with the target's title.
 - If `NOTION_API_KEY` is not set, the script exits with an error.

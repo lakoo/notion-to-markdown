@@ -5,9 +5,11 @@ A single-file CLI tool that converts Notion pages, databases, or views to Markdo
 ## Features
 
 - **Page** — Convert any Notion page to Markdown; embedded database blocks are expanded inline.
+- **Page mentions** — Bare `<mention-page>` tags are expanded with the title of the page, database, or block they point at.
 - **Database** — Render a database as a Markdown table using its first accessible view.
 - **View** — Render a specific view (identified by `?v=` in the URL) as a Markdown table.
 - **Frontmatter** — Output includes YAML-style metadata (source URL, block ID, type, title, breadcrumbs, fetch time, tool version).
+- **Request deduplication** — GET responses are memoized for the duration of a run, so repeated lookups of the same resource cost a single request.
 - **Rate-limit resilience** — Automatic retry with `Retry-After` header or exponential backoff on 429 responses.
 - **Configurable logging** — `--verbose` / `--quiet` flags control log output on stderr.
 
@@ -78,11 +80,18 @@ Filtering to visible columns is an optimization that reduces payload size, but u
 **Filter nesting is limited to 2 levels.**
 The Data Source Query API only accepts compound filters (`and` / `or`) up to 2 levels deep. When a view's built-in filter is already at this limit (e.g. `or(A, and(B, C))`), merging quick-filters would exceed it. The script detects this via `_has_nested_compound()` and relies on view query intersection to fill the filtering gap instead.
 
+**Mentions are resolved through the Block API.**
+A `<mention-page>` URL can point at a page, an inline database, or an ordinary block (Notion's "copy link to block"). `GET /pages/{id}` rejects the latter two with a 400, so mentions are resolved through `GET /blocks/{id}` — it returns a title for pages and databases, and a block's own text otherwise. Each unique target is looked up once per run, however many times it is mentioned.
+
+**The Page Markdown API leaves most mentions unlabelled.**
+Mentions normally arrive as bare `<mention-page url="..." />` tags. One occasionally carries a label, but a label in one place says nothing about the same mention elsewhere. Self-closing mentions are expanded; ones Notion already labelled are left untouched.
+
 ## Known limitations
 
 - **Relation properties** — Output as `<N relation(s)>` (placeholder; no fetched summaries).
 - **Rollup arrays** — Output as `<array>` (placeholder).
 - **Database columns** — Derived from the first row's property keys; columns not present in the first row are omitted.
+- **Mentions of inline databases** — Resolved to the inline database *block*'s title, which Notion may leave as `Untitled` even when the database itself has a name (the name lives on the data source, reachable only via the Views API).
 - **Pagination of final output** — The script assumes the output fits in memory; no streaming support.
 
 ## Claude Code Skill
