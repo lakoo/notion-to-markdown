@@ -402,13 +402,19 @@ MENTION_PAGE_RE = re.compile(
     r'<mention-page\s+[^>]*?(?<=\s)url="(?P<url>[^"]+)"[^>]*?/>',
     re.I
 )
+# Each unique mention costs an API round-trip, so expansion is capped at this many
+# targets; --force-expand-mentions overrides.
+MENTION_EXPAND_LIMIT = 50
 
 
-def expand_mentions(md: str) -> str:
+def expand_mentions(md: str, force: bool = False) -> str:
     """Expand self-closing <mention-page> tags into labelled ones.
 
     Notion only fills in the label when it already resolved that page earlier
     in the same render, so most mentions arrive bare.
+
+    Above ``MENTION_EXPAND_LIMIT`` unique targets nothing is expanded, unless
+    ``force`` is set.
     """
     matches = MENTION_PAGE_RE.findall(md)
     logger.info("[expand_mentions] Page has %d unexpanded mention-page block(s)", len(matches))
@@ -417,6 +423,14 @@ def expand_mentions(md: str) -> str:
 
     # One lookup per URL, success or failure.
     unique_urls = dict.fromkeys(matches)
+    if not force and len(unique_urls) > MENTION_EXPAND_LIMIT:
+        logger.warning(
+            "[expand_mentions] Skipping expansion: %d unique targets exceed the %d-target limit "
+            "(use --force-expand-mentions to override)",
+            len(unique_urls), MENTION_EXPAND_LIMIT,
+        )
+        return md
+
     replacements = {}
 
     def repl(match: re.Match) -> str:
@@ -560,13 +574,13 @@ def render_database(db_id: str) -> dict:
     return render_view(view_id)
 
 
-def render_page(page_id: str) -> dict:
+def render_page(page_id: str, force_expand_mentions: bool = False) -> dict:
     title = get_page_title(page_id)
     md = get_page_markdown(page_id)
 
     # Runs before the database scan, so pages without any database block get
     # their mentions expanded too.
-    md = expand_mentions(md)
+    md = expand_mentions(md, force=force_expand_mentions)
 
     tags = list(DB_TAG_RE.finditer(md))
     total = len(tags)
@@ -602,7 +616,7 @@ def render_page(page_id: str) -> dict:
     return {"title": title if title else "Untitled", "markdown": body, "ok": True}
 
 
-def render_from_url(url: str) -> str:
+def render_from_url(url: str, force_expand_mentions: bool = False) -> str:
     """
     Render a Notion URL to markdown.
 
@@ -646,7 +660,7 @@ def render_from_url(url: str) -> str:
 
     if block_type == "child_page":
         logger.info("[render_from_url] Page URL detected")
-        result = render_page(block_id)
+        result = render_page(block_id, force_expand_mentions=force_expand_mentions)
         breadcrumbs = _build_breadcrumbs(block.get("parent", {}))
         frontmatter = _make_frontmatter(url, block_id, "page", result["title"], breadcrumbs)
         return f"{frontmatter}\n{result['markdown']}"
@@ -683,6 +697,10 @@ if __name__ == "__main__":
     group.add_argument("-v", "--verbose", action="store_true", help="enable verbose (debug) output")
     group.add_argument("-q", "--quiet", action="store_true", help="suppress info output, show warnings and errors only")
     parser.add_argument("-o", "--output", metavar="FILE", help="write output to FILE instead of stdout")
+    parser.add_argument(
+        "--force-expand-mentions", action="store_true",
+        help=f"expand mentions even past the {MENTION_EXPAND_LIMIT}-target limit",
+    )
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else (logging.WARNING if args.quiet else logging.INFO)
@@ -703,7 +721,7 @@ if __name__ == "__main__":
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
 
-        markdown = render_from_url(args.notion_url)
+        markdown = render_from_url(args.notion_url, force_expand_mentions=args.force_expand_mentions)
         if not markdown.endswith('\n'):
             markdown += '\n'
         logger.info("[main] Outputting markdown to %s >>>>>>>>>>", args.output or "stdout")
