@@ -49,7 +49,22 @@ Supported URL formats:
 | `-v` / `--verbose` | Enable debug output (to stderr) |
 | `-q` / `--quiet` | Suppress info output, show warnings/errors only |
 | `-o FILE` / `--output FILE` | Write Markdown output to a file instead of stdout |
+| `--force-expand-mentions` | Expand mentions even past the 50-target limit |
 | `--version` | Show version and exit |
+
+### Mention expansion
+
+Bare `<mention-page>` tags are resolved to their target's title by default, but that costs one API call per **unique** target, so a page that is mostly links can take minutes. Expansion is all-or-nothing: past **50 unique targets** nothing is expanded, and the run says so:
+
+```
+[W] [expand_mentions] Skipping expansion: 247 unique targets exceed the 50-target limit (use --force-expand-mentions to override)
+```
+
+You usually do not need to do anything — the default is safe either way. When you already know you want the titles, pass `--force-expand-mentions` to expand regardless; expect a slow run on a page with hundreds of mentions.
+
+The mentions keep their full URLs either way, so follow up on any single one by fetching that URL directly rather than expanding the whole page.
+
+Two things that are expected, not failures: mentions Notion itself already labelled are never touched, so they keep their titles even when expansion is skipped; and the cap affects page URLs only — embedded database tables are always expanded.
 
 ### Recommended Workflow (for agents)
 
@@ -99,17 +114,17 @@ After converting, confirm:
 - Output is valid Markdown (headings, lists, tables, etc. are intact).
 - All blocks from the Notion page are captured (no empty sections where content should be).
 - Embedded database tables are expanded correctly (look for `_(error` markers).
-- Page mentions carry a title, e.g. `<mention-page url="...">Title</mention-page>`. A `_(error fetching title:` label means that lookup failed; the URL is still there to follow up.
+- Page mentions carry a title, e.g. `<mention-page url="...">Title</mention-page>`. A `_(error fetching title:` label means that lookup failed; the URL is still there to follow up. Bare `<mention-page url="..."/>` tags are expected whenever the run reported skipping expansion — see *Mention expansion*.
 
 ## Timeout & Progress
 
 - **stdout is empty until the script finishes** — the entire output is assembled and then emitted at once. Seeing no stdout does NOT mean the script is stuck.
 - **Progress is logged to stderr in real-time.** Watch for heartbeat lines like `[expand_mentions] Expanding mention 3/16 (...)`, `[render_view]`, and `[render_database]`, which indicate the script is actively processing.
-- **Pages with many embedded databases or page mentions can take 60+ seconds.** Each unique mentioned page costs roughly another half second of API round-trip. Do not impose a short timeout. When invoking through a shell tool, use `timeout: 120000` (or omit the timeout) to allow enough time.
+- **Pages with many embedded databases or page mentions can take 60+ seconds.** Each unique mentioned page costs another API round-trip, which is why expansion stops at 50 unique targets — see *Mention expansion* above. Do not impose a short timeout. When invoking through a shell tool, use `timeout: 120000` (or omit the timeout) to allow enough time. If you passed `--force-expand-mentions` on a link-heavy page, allow several minutes.
 - **Use `-v` for more detail.** Debug-level logs show each Notion API call, which helps diagnose slow pages.
 
 ## Notes
 
 - The script outputs rendered Markdown to **stdout**. Log messages go to **stderr**, so capturing stdout cleanly (e.g., redirecting to a file) works without log noise.
-- Embedded `<database>` tags are expanded into Markdown tables, and bare `<mention-page>` tags are expanded with the target's title.
+- Embedded `<database>` tags are expanded into Markdown tables, and bare `<mention-page>` tags are expanded with the target's title (skipped entirely past 50 unique targets; `--force-expand-mentions` overrides).
 - If `NOTION_API_KEY` is not set, the script exits with an error.

@@ -5,7 +5,7 @@ A single-file CLI tool that converts Notion pages, databases, or views to Markdo
 ## Features
 
 - **Page** — Convert any Notion page to Markdown; embedded database blocks are expanded inline.
-- **Page mentions** — Bare `<mention-page>` tags are expanded with the title of the page, database, or block they point at.
+- **Page mentions** — Bare `<mention-page>` tags are expanded with the title of the page, database, or block they point at. Expansion is all-or-nothing: past 50 unique targets nothing is expanded; `--force-expand-mentions` overrides.
 - **Database** — Render a database as a Markdown table using its first accessible view.
 - **View** — Render a specific view (identified by `?v=` in the URL) as a Markdown table.
 - **Frontmatter** — Output includes YAML-style metadata (source URL, block ID, type, title, breadcrumbs, fetch time, tool version).
@@ -34,6 +34,9 @@ export NOTION_API_KEY="ntn_xxxxx"
 
 # Quiet mode (stderr: warnings & errors only)
 ./notion2md.py -q "https://www.notion.so/..."
+
+# Expand mentions on a link-heavy page (skipped by default past 50 unique targets)
+./notion2md.py --force-expand-mentions "https://www.notion.so/..."
 ```
 
 ### Options
@@ -43,6 +46,7 @@ export NOTION_API_KEY="ntn_xxxxx"
 | `-v`, `--verbose` | Enable debug logging to stderr |
 | `-q`, `--quiet` | Suppress info logs, show warnings/errors only |
 | `-o FILE`, `--output FILE` | Write output to a file instead of stdout |
+| `--force-expand-mentions` | Expand mentions even past the 50-target limit |
 | `--version` | Show version and exit |
 
 ## Background
@@ -85,6 +89,9 @@ A `<mention-page>` URL can point at a page, an inline database, or an ordinary b
 
 **The Page Markdown API leaves most mentions unlabelled.**
 Mentions normally arrive as bare `<mention-page url="..." />` tags. One occasionally carries a label, but a label in one place says nothing about the same mention elsewhere. Self-closing mentions are expanded; ones Notion already labelled are left untouched.
+
+**Mention expansion is capped at 50 unique targets.**
+Resolving a mention costs one `GET /blocks/{id}` per unique target, and the calls are serialized, so a page that is largely links can take minutes to convert. That is the right trade for an ordinary page, where the titles are context, but not for an index page, where the links *are* the content. The unique-target count is read off the page Markdown before any lookup, so applying the cap costs nothing. Past it, every mention is left bare and a warning reports the count; `--force-expand-mentions` expands them anyway. Either way the URLs survive in full, so any single title can be resolved later by fetching that URL directly. The cap applies to page URLs only — embedded database blocks are always expanded, and mentions Notion already labelled keep their titles.
 
 ## Known limitations
 
