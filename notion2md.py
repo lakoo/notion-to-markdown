@@ -251,7 +251,8 @@ def _expand_quick_filters(quick_filters: dict) -> list:
 
 
 def _clean_filter(node):
-    """Recursively remove empty filter conditions (e.g. ``{"rich_text": {}}``).
+    """Recursively remove empty filter conditions (e.g. ``{"rich_text": {}}`` or
+    a bare ``{"property": "x"}``).
 
     View filters may include property conditions with no operator set, which the
     view itself ignores but the data-source query API rejects.
@@ -269,9 +270,13 @@ def _clean_filter(node):
             return cleaned[0]
         return {key: cleaned}
     if "property" in node:
+        # Bare node: "property" with no operator key at all.
+        if len(node) == 1:
+            return None
         for type_key, val in node.items():
             if type_key == "property":
                 continue
+            # Operator present, but its condition is empty, e.g. {"select": {}}.
             if isinstance(val, dict) and len(val) == 0:
                 return None
         return node
